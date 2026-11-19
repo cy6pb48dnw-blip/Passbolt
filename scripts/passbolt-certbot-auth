@@ -1,0 +1,51 @@
+#!/bin/bash
+set -euo pipefail
+
+IDENTIFIER="${CERTBOT_IDENTIFIER:-${CERTBOT_DOMAIN:-}}"
+
+: "${IDENTIFIER:?CERTBOT_IDENTIFIER absent}"
+: "${CERTBOT_VALIDATION:?CERTBOT_VALIDATION absent}"
+
+/usr/local/sbin/passbolt-ovh-dns \
+    txt-presenter \
+    "$IDENTIFIER" \
+    "$CERTBOT_VALIDATION"
+
+CHALLENGE="_acme-challenge.vault.ergo3.ch"
+
+mapfile -t NSS < <(
+    dig +short NS ergo3.ch |
+    sed 's/\.$//' |
+    sort -u
+)
+
+if [ "${#NSS[@]}" -eq 0 ]; then
+    echo "DNS autoritatifs introuvables" >&2
+    exit 1
+fi
+
+echo "Attente propagation DNS..."
+
+for i in $(seq 1 30); do
+    ALL_OK=1
+
+    for NS in "${NSS[@]}"; do
+        if ! dig +short TXT "$CHALLENGE" @"$NS" \
+            | tr -d '"' \
+            | grep -Fxq "$CERTBOT_VALIDATION"
+        then
+            ALL_OK=0
+            break
+        fi
+    done
+
+    if [ "$ALL_OK" -eq 1 ]; then
+        echo "TXT visible sur tous les DNS autoritatifs."
+        exit 0
+    fi
+
+    sleep 10
+done
+
+echo "Timeout propagation DNS après 300 secondes." >&2
+exit 1
