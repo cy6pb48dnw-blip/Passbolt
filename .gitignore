@@ -1,0 +1,37 @@
+# Secrets / credentials
+.env
+.env.*
+*.secret
+*.secrets
+ovh-ergo3.conf
+passbolt.php
+
+# Private keys / certificates
+*privatekey*
+*.key
+privkey.pem
+serverkey_private.asc
+recovery*.asc
+recovery*.key
+
+# WireGuard configs may contain private keys
+wg0.conf
+
+# Database / backups
+*.sql
+*.dump
+*.bak
+*.tar
+*.tar.gz
+*.tgz
+backups/
+backup/
+
+# Logs
+*.log
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
