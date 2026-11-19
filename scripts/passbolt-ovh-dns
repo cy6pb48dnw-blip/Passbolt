@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+CONFIG = Path("/etc/vitalink/ovh-ergo3.conf")
+
+ENDPOINT_DEFAULT = "https://eu.api.ovh.com/1.0"
+ZONE = "ergo3.ch"
+
+ALLOWED_FQDN = "vault.ergo3.ch"
+CHALLENGE_SUBDOMAIN = "_acme-challenge.vault"
+
+
+def fail(message):
+    raise SystemExit(message)
+
+
+def load_config():
+    if not CONFIG.is_file():
+        fail(f"{CONFIG} absent")
+
+    st = CONFIG.stat()
+
+    if st.st_mode & 0o077:
+        fail(f"{CONFIG} doit être en 0600")
+
+    cfg = {}
+
+    for raw in CONFIG.read_text().splitlines():
+        raw = raw.strip()
+
+        if not raw or raw.startswith("#"):
+            continue
+
+        if "=" not in raw:
+            continue
+
+        key, value = raw.split("=", 1)
+        cfg[key.strip()] = value.strip()
+
+    for key in (
+        "OVH_APPLICATION_KEY",
+        "OVH_APPLICATION_SECRET",
+        "OVH_CONSUMER_KEY",
+    ):
+        if not cfg.get(key):
+            fail(f"{key} absent")
+
+    cfg.setdefault("OVH_ENDPOINT", ENDPOINT_DEFAULT)
+
+    return cfg
+
+
+class OVH:
+    def __init__(self):
+        cfg = load_config()
+
+        self.endpoint = cfg["OVH_ENDPOINT"].rstrip("/")
+        self.application_key = cfg["OVH_APPLICATION_KEY"]
+        self.application_secret = cfg["OVH_APPLICATION_SECRET"]
+        self.consumer_key = cfg["OVH_CONSUMER_KEY"]
+
+    def server_time(self):
+        with urlopen(
+            self.endpoint + "/auth/time",
+            timeout=15,
+        ) as response:
+            return response.read().decode().strip()
+
+    def call(self, method, path, body=None, query=None):
+        url = self.endpoint + path
+
+        if query:
+            url += "?" + urlencode(query)
+
+        body_text = (
+            ""
+            if body is None
+            else json.dumps(body, separators=(",", ":"))
+        )
+
+        timestamp = self.server_time()
+
+        signature = "$1$" + hashlib.sha1(
+            "+".join(
+                [
+                    self.application_secret,
+                    self.consumer_key,
+                    method,
+                    url,
+                    body_text,
+                    timestamp,
+                ]
+            ).encode()
+        ).hexdigest()
+
+        headers = {
+            "Accept": "application/json",
+            "X-Ovh-Application": self.application_key,
+            "X-Ovh-Consumer": self.consumer_key,
+            "X-Ovh-Timestamp": timestamp,
+            "X-Ovh-Signature": signature,
+            "User-Agent": "passbolt-ovh-dns/1",
+        }
+
+        data = None
+
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            data = body_text.encode()
+
+        request = Request(
+            url,
+            data=data,
+            headers=headers,
+            method=method,
+        )
+
+        try:
+            with urlopen(request, timeout=30) as response:
+                payload = response.read()
+
+        except HTTPError as exc:
+            fail(
+                f"OVH HTTP {exc.code}: "
+                f"{exc.read().decode(errors='replace')}"
+            )
+
+        except URLError as exc:
+            fail(f"OVH connexion impossible: {exc}")
+
+        return json.loads(payload) if payload else None
+
+
+def validate_identifier(identifier):
+    value = identifier.lower().rstrip(".")
+
+    if value.startswith("*."):
+        value = value[2:]
+
+    if value != ALLOWED_FQDN:
+        fail(
+            f"Domaine refusé: {value}. "
+            f"Seul {ALLOWED_FQDN} est autorisé."
+        )
+
+    return value
+
+
+def record_ids(api):
+    return (
+        api.call(
+            "GET",
+            f"/domain/zone/{ZONE}/record",
+            query={
+                "fieldType": "TXT",
+                "subDomain": CHALLENGE_SUBDOMAIN,
+            },
+        )
+        or []
+    )
+
+
+def get_record(api, record_id):
+    return api.call(
+        "GET",
+        f"/domain/zone/{ZONE}/record/{record_id}",
+    )
+
+
+def refresh(api):
+    api.call(
+        "POST",
+        f"/domain/zone/{ZONE}/refresh",
+    )
+
+
+def txt_present(identifier, validation):
+    validate_identifier(identifier)
+
+    api = OVH()
+
+    for record_id in record_ids(api):
+        record = get_record(api, record_id)
+
+        current = str(
+            record.get("target", "")
+        ).strip('"')
+
+        if current == validation.strip('"'):
+            print(
+                f"TXT déjà présent: "
+                f"{CHALLENGE_SUBDOMAIN}.{ZONE}"
+            )
+            return
+
+    result = api.call(
+        "POST",
+        f"/domain/zone/{ZONE}/record",
+        body={
+            "fieldType": "TXT",
+            "subDomain": CHALLENGE_SUBDOMAIN,
+            "target": validation,
+            "ttl": 60,
+        },
+    )
+
+    refresh(api)
+
+    record_id = (
+        result.get("id")
+        if isinstance(result, dict)
+        else "?"
+    )
+
+    print(
+        f"TXT créé: "
+        f"{CHALLENGE_SUBDOMAIN}.{ZONE} "
+        f"id={record_id}"
+    )
+
+
+def txt_remove(identifier, validation):
+    validate_identifier(identifier)
+
+    api = OVH()
+    removed = 0
+
+    for record_id in record_ids(api):
+        record = get_record(api, record_id)
+
+        current = str(
+            record.get("target", "")
+        ).strip('"')
+
+        if current == validation.strip('"'):
+            api.call(
+                "DELETE",
+                f"/domain/zone/{ZONE}/record/{record_id}",
+            )
+
+            removed += 1
+
+    if removed:
+        refresh(api)
+
+    print(
+        f"TXT supprimé: "
+        f"{CHALLENGE_SUBDOMAIN}.{ZONE} "
+        f"({removed})"
+    )
+
+
+def main():
+    if os.geteuid() != 0:
+        fail("root requis")
+
+    parser = argparse.ArgumentParser()
+
+    sub = parser.add_subparsers(
+        dest="command",
+        required=True,
+    )
+
+    present = sub.add_parser("txt-presenter")
+    present.add_argument("identifier")
+    present.add_argument("validation")
+
+    remove = sub.add_parser("txt-retirer")
+    remove.add_argument("identifier")
+    remove.add_argument("validation")
+
+    args = parser.parse_args()
+
+    if args.command == "txt-presenter":
+        txt_present(
+            args.identifier,
+            args.validation,
+        )
+
+    elif args.command == "txt-retirer":
+        txt_remove(
+            args.identifier,
+            args.validation,
+        )
+
+
+if __name__ == "__main__":
+    main()
