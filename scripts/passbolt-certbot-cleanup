@@ -1,0 +1,12 @@
+#!/bin/bash
+set -euo pipefail
+
+IDENTIFIER="${CERTBOT_IDENTIFIER:-${CERTBOT_DOMAIN:-}}"
+
+: "${IDENTIFIER:?CERTBOT_IDENTIFIER absent}"
+: "${CERTBOT_VALIDATION:?CERTBOT_VALIDATION absent}"
+
+/usr/local/sbin/passbolt-ovh-dns \
+    txt-retirer \
+    "$IDENTIFIER" \
+    "$CERTBOT_VALIDATION"
