@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+
+case " ${RENEWED_DOMAINS:-} " in
+  *" vault.ergo3.ch "*)
+    if ! OUTPUT=$(/usr/sbin/nginx -t 2>&1); then
+        echo "$OUTPUT" >&2
+        exit 1
+    fi
+
+    /usr/bin/systemctl reload nginx
+    ;;
+esac
